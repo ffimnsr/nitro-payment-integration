@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -80,6 +81,26 @@ type (
 		PayAmount   string `json:"pay_amount" form:"pay_amount"`
 		Token       string `json:"token" form:"token"`
 	}
+
+	PaypalAccessTokenResponse struct {
+		Scope       string `json:"scope"`
+		Nonce       string `json:"nonce"`
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+		AppID       string `json:"app_id"`
+		ExpiresIn   int64  `json:"expires_in"`
+	}
+
+	PaypalPaymentResponse struct {
+		ID           string     `json:"id"`
+		CreateTime   time.Time  `json:"create_time"`
+		UpdateTime   time.Time  `json:"update_time"`
+		State        string     `json:"state"`
+		Intent       string     `json:"intent"`
+		Payer        echo.Map   `json:"payer"`
+		Transactions []echo.Map `json:"transactions"`
+		Links        []echo.Map `json:"links"`
+	}
 )
 
 func (t *Template) Render(w io.Writer, name string, data interface{},
@@ -103,11 +124,11 @@ func main() {
 	}
 
 	e.GET("/", index)
-	e.GET("/success", index)
+	e.GET("/success", success)
 
-	e.POST("/payments/paypal/webhook", index)
-	e.POST("/payments/paypal/checkout/create", index)
-	e.POST("/payments/paypal/checkout/execute", index)
+	e.POST("/payments/paypal/webhook", paypalNotificationWebhook)
+	e.POST("/payments/paypal/checkout/create", paypalCreatePayment)
+	e.POST("/payments/paypal/checkout/execute", paypalExecutePayment)
 	e.POST("/payments/coingate/callback", coingateCallback)
 
 	e.Logger.Fatal(e.Start("127.0.0.1:1313"))
@@ -122,6 +143,45 @@ func index(c echo.Context) error {
 	log.Print(string(dump))
 
 	return c.Render(http.StatusOK, "payment", "World")
+}
+
+func success(c echo.Context) error {
+	return nil
+}
+
+func paypalNotificationWebhook(c echo.Context) error {
+	return nil
+}
+
+func paypalCreatePayment(c echo.Context) error {
+	data, err := createPaymentPaypal()
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, echo.Map{
+			"success": false,
+			"message": err,
+		})
+	}
+	
+	return c.JSON(http.StatusOK, echo.Map{
+		"paymentID": data.ID,
+	})
+}
+
+func paypalExecutePayment(c echo.Context) error {
+	paymentID := c.FormValue("paymentID")
+	payerID := c.FormValue("payerID")
+
+	data, err := executePaymentPaypal(paymentID, payerID)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, echo.Map{
+			"success": false,
+			"message": err,
+		})
+	}
+
+	return c.JSON(http.StatusOK, echo.Map{
+		"success": true,
+	})
 }
 
 func coingateCallback(c echo.Context) error {
@@ -266,47 +326,119 @@ func ping() (bool, error) {
 	return false, err
 }
 
-func createPaymentPaypal() error {
-	d := strconv.FormatInt(id, 10)
+func getPaypalAccessToken() (PaypalAccessTokenResponse, error) {
+	path := fmt.Sprintf("%s/v1/oauth2/token", PaypalSandboxURL)
+	log.Print(path)
+
+	headers := map[string]string{
+		"Accept":          "application/json",
+		"Accept-Language": "en_US",
+	}
+
+	construct := url.Values{}
+	construct.Add("grant_type", "client_credentials")
+	message := construct.Encode()
+
+	data := PaypalAccessTokenResponse{}
+
+	err := sendPayloadAuth("POST", path, PaypalClientID, PaypalSecret, headers,
+		strings.NewReader(message), &data)
+	if err != nil {
+		return data, err
+	}
+
+	return data, nil
+}
+
+func createPaymentPaypal() (PaypalPaymentResponse, error) {
 	path := fmt.Sprintf("%s/v1/payments/payment", PaypalSandboxURL)
 	log.Print(path)
 
-	auth := fmt.Sprintf("Bearer %s", PaypalSecret)
+	auth := fmt.Sprintf("Bearer %s", "A21AAELhBtesT-8vN5W67ffHUFal_cP-hY1nQf3YowxscIvaUHYPXe-H5rAsj2yn-G-CFRfmukk6GLRlJI0XI3qQe_AbEeX7w")
 
 	headers := map[string]string{
 		"Authorization": auth,
-		"Content-Type": "application/json",
+		"Content-Type":  "application/json",
 	}
 
 	message := echo.Map{
 		"intent": "sale",
-		"experience_profile_id": "",
-		"redirect_urls": {
+		"redirect_urls": echo.Map{
 			"return_url": "https://staging42.serveo.net/",
-			"cancel_url": "https://staging42.serveo.net/"
+			"cancel_url": "https://staging42.serveo.net/",
 		},
-		"payer": {
-			"payment_method": "paypal"
+		"payer": echo.Map{
+			"payment_method": "paypal",
 		},
 		"transactions": []echo.Map{
-			"amount": {
-				"total": "4.00",
-				"currency": "USD",
-				"details": {
-					"subtotal": "2.00",
-					"shipping": "1.00",
-					"tax": "2.00",
-					"shipping_discount": "-1.00"
-				}
-			}
+			echo.Map{
+				"amount": echo.Map{
+					"total":    "4.00",
+					"currency": "USD",
+				},
+			},
 		},
-		"note_to_payer": "Contact us for any questions on your order.",
-		"description": "The payment transaction description.",
-		"invoice_number": "merchant invoice",
-		"custom": "merchant custom data"
 	}
 
-	err := sendPayload("GET", path, headers, nil, &data)
+	data := PaypalPaymentResponse{}
+
+	b, err := json.Marshal(message)
+	if err != nil {
+		return data, err
+	}
+
+	err = sendPayload("POST", path, headers, bytes.NewReader(b), &data)
+	if err != nil {
+		return data, err
+	}
+
+	return data, nil
+}
+
+func executePaymentPaypal(paymentID, payerID string) (PaypalPaymentResponse, error) {
+	path := fmt.Sprintf("%s/v1/payments/payment/%s/execute/", PaypalSandboxURL, paymentID)
+	log.Print(path)
+
+	auth := fmt.Sprintf("Bearer %s", "A21AAELhBtesT-8vN5W67ffHUFal_cP-hY1nQf3YowxscIvaUHYPXe-H5rAsj2yn-G-CFRfmukk6GLRlJI0XI3qQe_AbEeX7w")
+
+	headers := map[string]string{
+		"Authorization": auth,
+		"Content-Type":  "application/json",
+	}
+
+	message := echo.Map{
+		"payer_id": payerID,
+	}
+
+	data := PaypalPaymentResponse{}
+
+	b, err := json.Marshal(message)
+	if err != nil {
+		return data, err
+	}
+
+	err = sendPayload("POST", path, headers, bytes.NewReader(b), &data)
+	if err != nil {
+		return data, err
+	}
+
+	return data, nil
+}
+
+func showPaymentPaypal(paymentID string) (PaypalPaymentResponse, error) {
+	path := fmt.Sprintf("%s/v1/payments/payment/%s", PaypalSandboxURL, paymentID)
+	log.Print(path)
+
+	auth := fmt.Sprintf("Bearer %s", "A21AAELhBtesT-8vN5W67ffHUFal_cP-hY1nQf3YowxscIvaUHYPXe-H5rAsj2yn-G-CFRfmukk6GLRlJI0XI3qQe_AbEeX7w")
+
+	headers := map[string]string{
+		"Authorization": auth,
+		"Content-Type":  "application/json",
+	}
+
+	data := PaypalPaymentResponse{}
+
+	err = sendPayload("POST", path, headers, nil, &data)
 	if err != nil {
 		return data, err
 	}
@@ -319,6 +451,41 @@ func sendPayload(method, path string, headers map[string]string, body io.Reader,
 	method = strings.ToUpper(method)
 
 	req, err := http.NewRequest(method, path, body)
+	if err != nil {
+		return err
+	}
+
+	for k, v := range headers {
+		req.Header.Add(k, v)
+	}
+
+	client := &http.Client{}
+	res, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+
+	contents, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("-- %d", res.StatusCode)
+
+	if err := json.Unmarshal(contents, &result); err != nil {
+		result = string(contents)
+	}
+
+	return nil
+}
+
+func sendPayloadAuth(method, path, username, password string,
+	headers map[string]string, body io.Reader, result interface{}) error {
+	method = strings.ToUpper(method)
+
+	req, err := http.NewRequest(method, path, body)
+	req.SetBasicAuth(username, password)
 	if err != nil {
 		return err
 	}

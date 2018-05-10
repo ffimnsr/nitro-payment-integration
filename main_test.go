@@ -43,3 +43,17 @@ func TestListOrders(t *testing.T) {
 	assert.Equal(t, int64(1), res.CurrentPage)
 	assert.Equal(t, int64(2), res.PerPage)
 }
+
+func TestPaypalGetAccessToken(t *testing.T){
+	res, err := getPaypalAccessToken()
+	assert.Nil(t, err)
+	t.Log(res.AccessToken)
+	assert.NotEmpty(t, res.AccessToken)
+}
+
+func TestPaypalCreatePayment(t *testing.T) {
+	res, err := createPaymentPaypal()
+	assert.Nil(t, err)
+	t.Log(res.ID)
+	assert.NotEmpty(t, res.ID)
+}
